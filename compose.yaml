@@ -1,0 +1,7 @@
+services:
+  lcc-hub:
+    build: .
+    image: lcc-hub:local
+    network_mode: host
+    environment:
+      OPENLCB_HUB_MDNSENABLED: "true"

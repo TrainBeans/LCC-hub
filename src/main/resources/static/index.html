@@ -1,0 +1,264 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>OpenLCB Hub Monitor</title>
+    <style>
+        *, *::before, *::after { box-sizing: border-box; }
+        body {
+            font-family: Arial, sans-serif;
+            margin: 2rem;
+            background: #f5f5f5;
+            color: #1f2937;
+        }
+        h1 { margin-top: 0; }
+        h2 { margin-top: 0; margin-bottom: 0.6rem; }
+        .card {
+            background: #fff;
+            border-radius: 0.5rem;
+            box-shadow: 0 1px 3px rgba(0,0,0,.15);
+            padding: 1rem 1.25rem;
+            margin-bottom: 1rem;
+        }
+        .status {
+            display: inline-block;
+            padding: 0.25rem 0.6rem;
+            border-radius: 999px;
+            font-weight: 700;
+            font-size: 0.85rem;
+        }
+        .up   { background: #dcfce7; color: #166534; }
+        .down { background: #fee2e2; color: #991b1b; }
+        ul { margin: 0.4rem 0 0; padding-left: 1.2rem; }
+        li { margin: 0.2rem 0; }
+        .muted { color: #6b7280; font-style: italic; }
+
+        /* ── traffic monitor ──────────────────────────── */
+        .traffic-toolbar {
+            display: flex;
+            align-items: center;
+            gap: 0.6rem;
+            margin-bottom: 0.6rem;
+            flex-wrap: wrap;
+        }
+        .traffic-toolbar label { font-size: 0.85rem; color: #374151; }
+        .btn {
+            padding: 0.25rem 0.7rem;
+            font-size: 0.8rem;
+            border: 1px solid #d1d5db;
+            border-radius: 0.3rem;
+            background: #f9fafb;
+            cursor: pointer;
+        }
+        .btn:hover { background: #e5e7eb; }
+        .btn.active { background: #dbeafe; border-color: #93c5fd; color: #1d4ed8; }
+        .sse-badge {
+            font-size: 0.75rem;
+            padding: 0.15rem 0.5rem;
+            border-radius: 999px;
+            margin-left: auto;
+        }
+        .sse-live { background: #dcfce7; color: #166534; }
+        .sse-off  { background: #fee2e2; color: #991b1b; }
+
+        #traffic-log {
+            height: 20rem;
+            overflow-y: scroll;
+            background: #0f172a;
+            color: #e2e8f0;
+            font-family: "Courier New", monospace;
+            font-size: 0.78rem;
+            border-radius: 0.35rem;
+            padding: 0.5rem 0.75rem;
+        }
+        .tr-row {
+            display: grid;
+            grid-template-columns: 6rem 1fr auto;
+            gap: 0.4rem;
+            padding: 0.08rem 0;
+            border-bottom: 1px solid rgba(255,255,255,.04);
+            white-space: nowrap;
+        }
+        .tr-time  { color: #94a3b8; flex-shrink: 0; }
+        .tr-frame { color: #a5f3fc; overflow: hidden; text-overflow: ellipsis; }
+        .tr-src   { color: #fbbf24; font-size: 0.72rem; text-align: right; white-space: nowrap; }
+
+        #traffic-count { font-size: 0.8rem; color: #6b7280; margin-left: 0.4rem; }
+        .filter-input {
+            padding: 0.2rem 0.5rem;
+            font-size: 0.8rem;
+            border: 1px solid #d1d5db;
+            border-radius: 0.3rem;
+            width: 10rem;
+        }
+    </style>
+</head>
+<body>
+
+<div class="card">
+    <h1>OpenLCB Hub Monitor</h1>
+    <p><strong>Hub status:</strong> <span id="hub-status" class="status down">Unknown</span></p>
+    <p><strong>Enabled:</strong> <span id="hub-enabled">-</span></p>
+    <p><strong>Hub port:</strong> <span id="hub-port">-</span></p>
+    <p><strong>Active connections:</strong> <span id="hub-connection-count">0</span></p>
+</div>
+
+<div class="card">
+    <h2>Connected Clients</h2>
+    <ul id="hub-connections"></ul>
+    <p id="no-connections" class="muted">No active clients.</p>
+</div>
+
+<div class="card">
+    <h2>Recent Hub Events</h2>
+    <ul id="hub-events"></ul>
+</div>
+
+<div class="card">
+    <h2>Traffic Monitor <span id="traffic-count"></span></h2>
+
+    <div class="traffic-toolbar">
+        <button class="btn" id="btn-pause">⏸ Pause</button>
+        <button class="btn" id="btn-clear">🗑 Clear</button>
+        <label>Filter: <input class="filter-input" type="text" id="filter-input" placeholder="e.g. :X182"></label>
+        <label><input type="checkbox" id="auto-scroll" checked> Auto-scroll</label>
+        <span id="sse-badge" class="sse-badge sse-off">● Connecting…</span>
+    </div>
+
+    <div id="traffic-log"></div>
+</div>
+
+<script>
+    // ── Status polling ────────────────────────────────────────────────────────
+    const statusEl      = document.getElementById("hub-status");
+    const enabledEl     = document.getElementById("hub-enabled");
+    const portEl        = document.getElementById("hub-port");
+    const countEl       = document.getElementById("hub-connection-count");
+    const connectionsEl = document.getElementById("hub-connections");
+    const noConnEl      = document.getElementById("no-connections");
+    const eventsEl      = document.getElementById("hub-events");
+
+    function setHubStatus(isRunning) {
+        statusEl.textContent = isRunning ? "Running" : "Stopped";
+        statusEl.classList.toggle("up",   isRunning);
+        statusEl.classList.toggle("down", !isRunning);
+    }
+
+    function renderList(listEl, values, fmt) {
+        listEl.innerHTML = "";
+        values.forEach(v => {
+            const li = document.createElement("li");
+            li.textContent = fmt(v);
+            listEl.appendChild(li);
+        });
+    }
+
+    async function refreshStatus() {
+        const r = await fetch("/api/hub/status");
+        const s = await r.json();
+        setHubStatus(s.running);
+        enabledEl.textContent   = s.enabled ? "true" : "false";
+        portEl.textContent      = s.port;
+        countEl.textContent     = s.activeConnections;
+        renderList(connectionsEl, s.connectedClients, c => c);
+        noConnEl.style.display  = s.connectedClients.length ? "none" : "block";
+        renderList(eventsEl, s.recentEvents.slice().reverse(),
+            e => `${new Date(e.timestamp).toLocaleTimeString()} — ${e.message}`);
+    }
+
+    refreshStatus().catch(() => setHubStatus(false));
+    setInterval(() => refreshStatus().catch(() => {}), 2000);
+
+    // ── Traffic monitor ───────────────────────────────────────────────────────
+    const logEl         = document.getElementById("traffic-log");
+    const sseBadge      = document.getElementById("sse-badge");
+    const btnPause      = document.getElementById("btn-pause");
+    const btnClear      = document.getElementById("btn-clear");
+    const filterInput   = document.getElementById("filter-input");
+    const autoScrollCb  = document.getElementById("auto-scroll");
+    const trafficCount  = document.getElementById("traffic-count");
+
+    let paused      = false;
+    let totalFrames = 0;
+    const MAX_ROWS  = 500;   // keep DOM lean
+
+    function shortSource(src) {
+        if (!src || src === "unknown") return "?";
+        // IPv4: /192.168.1.2:49200 → 192.168.1.2:49200
+        const m = src.match(/\/([\d.]+:\d+)/) || src.match(/([\w.]+:\d+)/);
+        return m ? m[1] : src.slice(-20);
+    }
+
+    function addTrafficRow(entry) {
+        if (paused) return;
+        const filter = filterInput.value.trim().toLowerCase();
+        if (filter && !entry.frame.toLowerCase().includes(filter)) return;
+
+        const time  = new Date(entry.timestamp).toLocaleTimeString([], {hour12: false, hour:"2-digit", minute:"2-digit", second:"2-digit"});
+        const row   = document.createElement("div");
+        row.className = "tr-row";
+        row.innerHTML =
+            `<span class="tr-time">${time}</span>` +
+            `<span class="tr-frame" title="${escHtml(entry.frame)}">${escHtml(entry.frame)}</span>` +
+            `<span class="tr-src">${escHtml(shortSource(entry.source))}</span>`;
+
+        logEl.appendChild(row);
+
+        // Trim old rows
+        while (logEl.children.length > MAX_ROWS) {
+            logEl.removeChild(logEl.firstChild);
+        }
+
+        if (autoScrollCb.checked) {
+            logEl.scrollTop = logEl.scrollHeight;
+        }
+
+        totalFrames++;
+        trafficCount.textContent = `(${totalFrames} frames)`;
+    }
+
+    function escHtml(s) {
+        return String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
+    }
+
+    btnPause.addEventListener("click", () => {
+        paused = !paused;
+        btnPause.textContent = paused ? "▶ Resume" : "⏸ Pause";
+        btnPause.classList.toggle("active", paused);
+    });
+
+    btnClear.addEventListener("click", () => {
+        logEl.innerHTML = "";
+        totalFrames = 0;
+        trafficCount.textContent = "";
+    });
+
+    // ── SSE connection ────────────────────────────────────────────────────────
+    let sse;
+
+    function connectSse() {
+        if (sse) sse.close();
+        sse = new EventSource("/api/hub/traffic/stream");
+
+        sse.addEventListener("traffic", e => {
+            try { addTrafficRow(JSON.parse(e.data)); } catch (_) {}
+        });
+
+        sse.onopen = () => {
+            sseBadge.textContent = "● Live";
+            sseBadge.className   = "sse-badge sse-live";
+        };
+
+        sse.onerror = () => {
+            sseBadge.textContent = "● Reconnecting…";
+            sseBadge.className   = "sse-badge sse-off";
+            // Browser auto-reconnects; we just update the badge
+        };
+    }
+
+    connectSse();
+</script>
+</body>
+</html>
+
