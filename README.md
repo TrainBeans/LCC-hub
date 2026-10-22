@@ -56,3 +56,17 @@ docker run --rm --name lcc-hub \
 For bridge networking without discovery, replace `--network host` with
 `-p 8080:8080 -p 12021:12021` and add
 `-e OPENLCB_HUB_MDNSENABLED=false`. Configure clients with the host's LAN address.
+
+## Continuous integration and releases
+
+GitHub Actions run on every push and pull request (`.github/workflows/ci.yml`),
+building and testing the application with Maven and verifying the Docker image
+builds.
+
+Publishing a GitHub release (`.github/workflows/release.yml`) builds the Docker
+image and pushes it to the GitHub Container Registry, tagged with the release
+version (and `latest` for non-prerelease versions):
+
+```sh
+docker pull ghcr.io/trainbeans/lcc-hub:latest
+```
